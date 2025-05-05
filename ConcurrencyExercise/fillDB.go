@@ -112,62 +112,73 @@ func FillDBData(w http.ResponseWriter, r *http.Request) {
 		go func() {
 			defer workersGroup.Done()
 
-			for range makeReqSignal {
-				var err error = errors.New("Dummy error for execution purposes")
+			for {
+				select {
+				case <-r.Context().Done():
+					log.Println("Stopping worker due to context being canceled...")
+					return
+				case shouldKeep := <-makeReqSignal:
+					if !shouldKeep {
+						break // Exit processing loop once makeReqSignal closes
+					}
 
-				var resp *http.Response
-				var req *http.Request
-				var respBytes []byte
-				for err != nil {
-					err = nil
+					var err error = errors.New("Dummy error for execution purposes")
 
-					select {
-					case <-r.Context().Done():
-						return
-					default:
+					var resp *http.Response
+					var req *http.Request
+					var respBytes []byte
+					for err != nil {
+						err = nil
 
-						req, err = http.NewRequestWithContext(r.Context(), http.MethodGet, "https://randomuser.me/api/?results=1", nil)
-						if err != nil {
-							log.Println("Error: Creating GET request")
-							continue
-						}
+						select {
+						case <-r.Context().Done():
+							log.Println("Stopping worker due to context being canceled...")
+							return
+						default:
 
-						resp, err = http.DefaultClient.Do(req)
-						if err != nil {
-							log.Println("Error: Doing GET request")
-							continue
-						}
-
-						respBytes, err = io.ReadAll(resp.Body)
-						if err != nil {
-							log.Println("Error: Reading HTTP body")
-							continue
-						}
-
-						var apiResponse APIResponse
-						err = json.Unmarshal(respBytes, &apiResponse)
-						if err != nil {
-							log.Printf("Error: Unmarshalling HTTP response body, maybe it was an error? (%s)", err)
-							log.Printf("Body: %s", string(respBytes))
-
-							var apiResponse APIError
-							err = json.Unmarshal(respBytes, &apiResponse)
+							req, err = http.NewRequestWithContext(r.Context(), http.MethodGet, "https://randomuser.me/api/?results=1", nil)
 							if err != nil {
-								log.Println("Error: Failed even to parse as an error!")
+								log.Println("Error: Creating GET request")
 								continue
 							}
 
-							continue
-						}
+							resp, err = http.DefaultClient.Do(req)
+							if err != nil {
+								log.Println("Error: Doing GET request")
+								continue
+							}
 
-						if len(apiResponse.Results) < 1 {
-							log.Println("Error: No user returned by the API")
-							err = errors.New("No results from the API")
-							continue
-						}
+							respBytes, err = io.ReadAll(resp.Body)
+							if err != nil {
+								log.Println("Error: Reading HTTP body")
+								continue
+							}
 
-						user := NewUserFromAPI(apiResponse.Results[0], apiResponse.Info)
-						outputChannel <- user
+							var apiResponse APIResponse
+							err = json.Unmarshal(respBytes, &apiResponse)
+							if err != nil {
+								log.Printf("Error: Unmarshalling HTTP response body, maybe it was an error? (%s)", err)
+								log.Printf("Body: %s", string(respBytes))
+
+								var apiResponse APIError
+								err = json.Unmarshal(respBytes, &apiResponse)
+								if err != nil {
+									log.Println("Error: Failed even to parse as an error!")
+									continue
+								}
+
+								continue
+							}
+
+							if len(apiResponse.Results) < 1 {
+								log.Println("Error: No user returned by the API")
+								err = errors.New("No results from the API")
+								continue
+							}
+
+							user := NewUserFromAPI(apiResponse.Results[0], apiResponse.Info)
+							outputChannel <- user
+						}
 					}
 				}
 			}
