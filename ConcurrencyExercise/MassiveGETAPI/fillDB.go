@@ -44,7 +44,7 @@ func NewUserFromAPI(u shared.APIUser, info map[string]any) User {
 
 const TARGET_USER_COUNT = 10_000
 const WORKER_COUNT = 50
-const USER_PER_REQUEST = 500
+const USERS_PER_REQUEST = 500
 
 var DB = make([]User, 0, TARGET_USER_COUNT)
 
@@ -57,24 +57,24 @@ func FillDBData(APIUrl string) http.HandlerFunc {
 		}
 
 		q := reqUrl.Query()
-		q.Set("results", strconv.FormatInt(USER_PER_REQUEST, 10))
+		q.Set("results", strconv.FormatInt(USERS_PER_REQUEST, 10))
 
 		reqUrl.RawQuery = q.Encode()
 		reqUrlString := reqUrl.String()
 		log.Printf("Target of GET requests: %s", reqUrlString)
 
-		outputChannel := make(chan User, TARGET_USER_COUNT/WORKER_COUNT)
+		processedUsers := make(chan User, USERS_PER_REQUEST*2)
 
-		makeReqSignal := make(chan bool, WORKER_COUNT*2)
+		workTickets := make(chan bool, WORKER_COUNT*2)
 		// Signal work thread
 		go func() {
-			defer close(makeReqSignal)
+			defer close(workTickets)
 
-			for range TARGET_USER_COUNT / USER_PER_REQUEST {
+			for range TARGET_USER_COUNT / USERS_PER_REQUEST {
 				select {
 				case <-r.Context().Done():
 					return
-				case makeReqSignal <- true:
+				case workTickets <- true:
 				}
 			}
 		}()
@@ -84,7 +84,7 @@ func FillDBData(APIUrl string) http.HandlerFunc {
 		appenderGroup.Add(1)
 		go func() {
 			defer appenderGroup.Done()
-			for user := range outputChannel {
+			for user := range processedUsers {
 				user.Id = uint(len(DB))
 				DB = append(DB, user)
 				log.Printf("Adding user with ID %d: %v", user.Id, user)
@@ -92,7 +92,6 @@ func FillDBData(APIUrl string) http.HandlerFunc {
 		}()
 
 		workersGroup := sync.WaitGroup{}
-
 		for i := range WORKER_COUNT {
 			workersGroup.Add(1)
 			go func() {
@@ -101,14 +100,15 @@ func FillDBData(APIUrl string) http.HandlerFunc {
 					workersGroup.Done()
 				}()
 
+			workerLoop:
 				for {
 					select {
 					case <-r.Context().Done():
 						log.Println("Stopping worker due to context being canceled...")
 						return
-					case shouldKeep := <-makeReqSignal:
+					case shouldKeep := <-workTickets:
 						if !shouldKeep {
-							break // Exit processing loop once makeReqSignal closes
+							break workerLoop // Exit processing loop once makeReqSignal closes
 						}
 
 						var err error = errors.New("Dummy error for execution purposes")
@@ -116,6 +116,7 @@ func FillDBData(APIUrl string) http.HandlerFunc {
 						var resp *http.Response
 						var req *http.Request
 						var respBytes []byte
+					requestLoop:
 						for err != nil {
 							err = nil
 
@@ -128,19 +129,19 @@ func FillDBData(APIUrl string) http.HandlerFunc {
 								req, err = http.NewRequestWithContext(r.Context(), http.MethodGet, reqUrlString, nil)
 								if err != nil {
 									log.Println("Error: Creating GET request")
-									continue
+									continue requestLoop
 								}
 
 								resp, err = http.DefaultClient.Do(req)
 								if err != nil {
 									log.Printf("Error: Doing GET request. `%s`", err)
-									continue
+									continue requestLoop
 								}
 
 								respBytes, err = io.ReadAll(resp.Body)
 								if err != nil {
 									log.Println("Error: Reading HTTP body")
-									continue
+									continue requestLoop
 								}
 
 								var apiResponse shared.APIResponse
@@ -153,21 +154,21 @@ func FillDBData(APIUrl string) http.HandlerFunc {
 									err = json.Unmarshal(respBytes, &apiResponse)
 									if err != nil {
 										log.Println("Error: Failed even to parse as an error!")
-										continue
+										continue requestLoop
 									}
 
-									continue
+									continue requestLoop
 								}
 
-								if len(apiResponse.Results) != USER_PER_REQUEST {
+								if len(apiResponse.Results) != USERS_PER_REQUEST {
 									log.Printf("Error: Not enough users returned by the API: %d != %d", len(apiResponse.Results), TARGET_USER_COUNT)
 									err = errors.New("No results from the API")
-									continue
+									continue requestLoop
 								}
 
 								for _, v := range apiResponse.Results {
 									user := NewUserFromAPI(v, apiResponse.Info)
-									outputChannel <- user
+									processedUsers <- user
 								}
 							}
 						}
@@ -178,7 +179,7 @@ func FillDBData(APIUrl string) http.HandlerFunc {
 
 		log.Println("Waiting for workers...")
 		workersGroup.Wait()
-		close(outputChannel)
+		close(processedUsers)
 
 		log.Println("Waiting for appenders...")
 		appenderGroup.Wait()
