@@ -1,24 +1,25 @@
-CREATE DATABASE sanitas;
-\c sanitas postgres;
+CREATE DATABASE exercise;
+\c exercise postgres;
 
 -- Create Tables
 
-CREATE TABLE User (
-	Id INTEGER NOT NULL PRIMARY KEY,
-	Gender VARCHAR(16) NOT NULL,
-	Name VARCHAR(64) NOT NULL,
-	Location VARCHAR(255) NOT NULL,
-	City VARCHAR(255) NOT NULL,
-	State VARCHAR(255) NOT NULL,
-	Country VARCHAR(255) NOT NULL,
-	Email VARCHAR(255) NOT NULL,
-	Phone VARCHAR(16) NOT NULL
-)
+CREATE TABLE db_user (
+    id INTEGER NOT NULL PRIMARY KEY,
+    gender VARCHAR(16) NOT NULL,
+    name VARCHAR(64) NOT NULL,
+    location VARCHAR(255) NOT NULL,
+    city VARCHAR(255) NOT NULL,
+    state VARCHAR(255) NOT NULL,
+    country VARCHAR(255) NOT NULL,
+    email VARCHAR(255) NOT NULL,
+    phone VARCHAR(16) NOT NULL
+);
 
 CREATE USER root WITH PASSWORD 'root';
-GRANT ALL PRIVILEGES ON DATABASE sanitas TO root;
+GRANT ALL PRIVILEGES ON DATABASE exercise TO root;
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO root;
 
 -- Creating main user the API is going to connect to...
 CREATE USER backend WITH PASSWORD 'backend';
-REVOKE ALL ON DATABASE sanitas FROM backend;
-GRANT CONNECT ON DATABASE sanitas TO backend;
+REVOKE ALL ON DATABASE exercise FROM backend;
+GRANT CONNECT ON DATABASE exercise TO backend;
