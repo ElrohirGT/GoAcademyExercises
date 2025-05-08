@@ -40,9 +40,9 @@ func mod(a, b uint64) uint64 {
 	}
 }
 
-func get_users(db *[]shared.APIUser) http.HandlerFunc {
+func get_users(db *shared.APIResponse) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var dbLength uint64 = uint64(len((*db)))
+		var dbLength uint64 = uint64(len(db.Results))
 		params, err := parseParams(w, r)
 		if err != nil {
 			return
@@ -53,11 +53,16 @@ func get_users(db *[]shared.APIUser) http.HandlerFunc {
 
 		for i := range params.UserCount {
 			idx := idxs[mod(i, dbLength)]
-			user := (*db)[idx]
+			user := db.Results[idx]
 			users = append(users, user)
 		}
 
-		respBytes, err := json.Marshal(users)
+		newResp := shared.APIResponse{
+			Results: users,
+			Info:    db.Info,
+		}
+
+		respBytes, err := json.Marshal(newResp)
 		if err != nil {
 			panic("Can't marshall the users response to json!")
 		}

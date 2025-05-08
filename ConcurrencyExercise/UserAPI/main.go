@@ -29,7 +29,7 @@ func CreateNewServer() *Server {
 	}
 }
 
-func (self *Server) MountHandlers(db *[]shared.APIUser) {
+func (self *Server) MountHandlers(db *shared.APIResponse) {
 	self.Router.HandleFunc("/users", get_users(db))
 }
 
@@ -64,7 +64,7 @@ func main() {
 	}
 
 	server := CreateNewServer()
-	server.MountHandlers(&resp.Results)
+	server.MountHandlers(&resp)
 
 	srv := &http.Server{
 		Addr: "0.0.0.0:8080",

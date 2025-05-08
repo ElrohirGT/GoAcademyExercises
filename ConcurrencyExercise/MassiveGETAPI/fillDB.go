@@ -55,8 +55,13 @@ func FillDBData(APIUrl string) http.HandlerFunc {
 		if err != nil {
 			panic("Failed to parse APIUrl!")
 		}
-		reqUrl.Query().Set("results", strconv.FormatInt(USER_PER_REQUEST, 10))
+
+		q := reqUrl.Query()
+		q.Set("results", strconv.FormatInt(USER_PER_REQUEST, 10))
+
+		reqUrl.RawQuery = q.Encode()
 		reqUrlString := reqUrl.String()
+		log.Printf("Target of GET requests: %s", reqUrlString)
 
 		outputChannel := make(chan User, TARGET_USER_COUNT/WORKER_COUNT)
 
@@ -128,7 +133,7 @@ func FillDBData(APIUrl string) http.HandlerFunc {
 
 								resp, err = http.DefaultClient.Do(req)
 								if err != nil {
-									log.Println("Error: Doing GET request")
+									log.Printf("Error: Doing GET request. `%s`", err)
 									continue
 								}
 
@@ -154,7 +159,7 @@ func FillDBData(APIUrl string) http.HandlerFunc {
 									continue
 								}
 
-								if len(apiResponse.Results) != TARGET_USER_COUNT {
+								if len(apiResponse.Results) != USER_PER_REQUEST {
 									log.Printf("Error: Not enough users returned by the API: %d != %d", len(apiResponse.Results), TARGET_USER_COUNT)
 									err = errors.New("No results from the API")
 									continue
