@@ -12,7 +12,9 @@ RUN CGO_ENABLED=0 go build -o /bin/goapp .
 
 # FROM debian:latest
 FROM alpine:3.14
+EXPOSE 8080
+
+COPY --from=build /src/UserAPI/source.json .
 COPY --from=build /bin/goapp /bin/goapp
-COPY --from=build /src/UserAPI/source.json /
 # ENTRYPOINT ["tail", "-f", "/dev/null"]
 CMD ["/bin/goapp"]
