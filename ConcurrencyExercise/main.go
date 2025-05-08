@@ -11,6 +11,11 @@ import (
 	"time"
 )
 
+type Params struct {
+	APIUrl          string
+	GracefulTimeout time.Duration
+}
+
 type Server struct {
 	Router *http.ServeMux
 }
@@ -21,17 +26,29 @@ func CreateNewServer() *Server {
 	}
 }
 
-func (self *Server) MountHandlers() {
-	self.Router.HandleFunc("/fillDB", FillDBData)
+func (self *Server) MountHandlers(params *Params) {
+	self.Router.HandleFunc("/fillDB", FillDBData(params.APIUrl))
+}
+
+func ParseParams() Params {
+	params := Params{}
+
+	flag.DurationVar(&params.GracefulTimeout, "graceful-timeout", time.Second*10, "the duration for which the server gracefully wait for existing connections to finish - e.g. 15s or 1m")
+	flag.Parse()
+
+	params.APIUrl = os.Getenv("API_URL")
+	if params.APIUrl == "" {
+		params.APIUrl = "https://randomuser.me/api/"
+	}
+
+	return params
 }
 
 func main() {
-	var wait time.Duration
-	flag.DurationVar(&wait, "graceful-timeout", time.Second*10, "the duration for which the server gracefully wait for existing connections to finish - e.g. 15s or 1m")
-	flag.Parse()
+	params := ParseParams()
 
 	server := CreateNewServer()
-	server.MountHandlers()
+	server.MountHandlers(&params)
 
 	srv := &http.Server{
 		Addr: "0.0.0.0:8080",
@@ -58,7 +75,7 @@ func main() {
 	<-c
 
 	// Create a deadline to wait for.
-	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	ctx, cancel := context.WithTimeout(context.Background(), params.GracefulTimeout)
 	defer cancel()
 
 	// Doesn't block if no connections, but will otherwise wait

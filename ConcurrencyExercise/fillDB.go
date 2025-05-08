@@ -7,6 +7,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"strconv"
 	"sync"
 )
 
@@ -72,127 +74,148 @@ func NewUserFromAPI(u APIUser, info map[string]any) User {
 }
 
 const TARGET_USER_COUNT = 10_000
-const WORKER_COUNT = 100
+const WORKER_COUNT = 50
+const USER_PER_REQUEST = 500
 
 var DB = make([]User, 0, TARGET_USER_COUNT)
 
-func FillDBData(w http.ResponseWriter, r *http.Request) {
-	outputChannel := make(chan User, TARGET_USER_COUNT/WORKER_COUNT)
+func FillDBData(APIUrl string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 
-	makeReqSignal := make(chan bool, WORKER_COUNT*2)
-	// Signal work thread
-	go func() {
-		defer close(makeReqSignal)
-
-		for range TARGET_USER_COUNT {
-			select {
-			case <-r.Context().Done():
-				return
-			case makeReqSignal <- true:
-			}
+		reqUrl, err := url.Parse(APIUrl)
+		if err != nil {
+			panic("Failed to parse APIUrl!")
 		}
-	}()
+		reqUrl.Query().Set("results", strconv.FormatInt(USER_PER_REQUEST, 10))
+		reqUrlString := reqUrl.String()
 
-	// Append to DB
-	appenderGroup := sync.WaitGroup{}
-	appenderGroup.Add(1)
-	go func() {
-		defer appenderGroup.Done()
-		for user := range outputChannel {
-			user.Id = uint(len(DB))
-			DB = append(DB, user)
-			log.Printf("Adding user with ID %d: %v", user.Id, user)
-		}
-	}()
+		outputChannel := make(chan User, TARGET_USER_COUNT/WORKER_COUNT)
 
-	workersGroup := sync.WaitGroup{}
-
-	for range WORKER_COUNT {
-		workersGroup.Add(1)
+		makeReqSignal := make(chan bool, WORKER_COUNT*2)
+		// Signal work thread
 		go func() {
-			defer workersGroup.Done()
+			defer close(makeReqSignal)
 
-			for {
+			for range TARGET_USER_COUNT / USER_PER_REQUEST {
 				select {
 				case <-r.Context().Done():
-					log.Println("Stopping worker due to context being canceled...")
 					return
-				case shouldKeep := <-makeReqSignal:
-					if !shouldKeep {
-						break // Exit processing loop once makeReqSignal closes
-					}
-
-					var err error = errors.New("Dummy error for execution purposes")
-
-					var resp *http.Response
-					var req *http.Request
-					var respBytes []byte
-					for err != nil {
-						err = nil
-
-						select {
-						case <-r.Context().Done():
-							log.Println("Stopping worker due to context being canceled...")
-							return
-						default:
-
-							req, err = http.NewRequestWithContext(r.Context(), http.MethodGet, "https://randomuser.me/api/?results=1", nil)
-							if err != nil {
-								log.Println("Error: Creating GET request")
-								continue
-							}
-
-							resp, err = http.DefaultClient.Do(req)
-							if err != nil {
-								log.Println("Error: Doing GET request")
-								continue
-							}
-
-							respBytes, err = io.ReadAll(resp.Body)
-							if err != nil {
-								log.Println("Error: Reading HTTP body")
-								continue
-							}
-
-							var apiResponse APIResponse
-							err = json.Unmarshal(respBytes, &apiResponse)
-							if err != nil {
-								log.Printf("Error: Unmarshalling HTTP response body, maybe it was an error? (%s)", err)
-								log.Printf("Body: %s", string(respBytes))
-
-								var apiResponse APIError
-								err = json.Unmarshal(respBytes, &apiResponse)
-								if err != nil {
-									log.Println("Error: Failed even to parse as an error!")
-									continue
-								}
-
-								continue
-							}
-
-							if len(apiResponse.Results) < 1 {
-								log.Println("Error: No user returned by the API")
-								err = errors.New("No results from the API")
-								continue
-							}
-
-							user := NewUserFromAPI(apiResponse.Results[0], apiResponse.Info)
-							outputChannel <- user
-						}
-					}
+				case makeReqSignal <- true:
 				}
 			}
 		}()
-	}
 
-	workersGroup.Wait()
-	close(outputChannel)
-	appenderGroup.Wait()
+		// Append to DB
+		appenderGroup := sync.WaitGroup{}
+		appenderGroup.Add(1)
+		go func() {
+			defer appenderGroup.Done()
+			for user := range outputChannel {
+				user.Id = uint(len(DB))
+				DB = append(DB, user)
+				log.Printf("Adding user with ID %d: %v", user.Id, user)
+			}
+		}()
 
-	respBytes, err := json.Marshal(&DB)
-	if err != nil {
-		panic("Can't marshal response!")
+		workersGroup := sync.WaitGroup{}
+
+		for i := range WORKER_COUNT {
+			workersGroup.Add(1)
+			go func() {
+				defer func() {
+					log.Println("Worker ", i, " Done!")
+					workersGroup.Done()
+				}()
+
+				for {
+					select {
+					case <-r.Context().Done():
+						log.Println("Stopping worker due to context being canceled...")
+						return
+					case shouldKeep := <-makeReqSignal:
+						if !shouldKeep {
+							break // Exit processing loop once makeReqSignal closes
+						}
+
+						var err error = errors.New("Dummy error for execution purposes")
+
+						var resp *http.Response
+						var req *http.Request
+						var respBytes []byte
+						for err != nil {
+							err = nil
+
+							select {
+							case <-r.Context().Done():
+								log.Println("Stopping worker due to context being canceled...")
+								return
+							default:
+
+								req, err = http.NewRequestWithContext(r.Context(), http.MethodGet, reqUrlString, nil)
+								if err != nil {
+									log.Println("Error: Creating GET request")
+									continue
+								}
+
+								resp, err = http.DefaultClient.Do(req)
+								if err != nil {
+									log.Println("Error: Doing GET request")
+									continue
+								}
+
+								respBytes, err = io.ReadAll(resp.Body)
+								if err != nil {
+									log.Println("Error: Reading HTTP body")
+									continue
+								}
+
+								var apiResponse APIResponse
+								err = json.Unmarshal(respBytes, &apiResponse)
+								if err != nil {
+									log.Printf("Error: Unmarshalling HTTP response body, maybe it was an error? (%s)", err)
+									log.Printf("Body: %s", string(respBytes))
+
+									var apiResponse APIError
+									err = json.Unmarshal(respBytes, &apiResponse)
+									if err != nil {
+										log.Println("Error: Failed even to parse as an error!")
+										continue
+									}
+
+									continue
+								}
+
+								if len(apiResponse.Results) != TARGET_USER_COUNT {
+									log.Println("Error: Not enough users returned by the API: %d", len(apiResponse.Results))
+									err = errors.New("No results from the API")
+									continue
+								}
+
+								for _, v := range apiResponse.Results {
+									user := NewUserFromAPI(v, apiResponse.Info)
+									outputChannel <- user
+								}
+							}
+						}
+					}
+				}
+			}()
+		}
+
+		log.Println("Waiting for workers...")
+		workersGroup.Wait()
+		close(outputChannel)
+
+		log.Println("Waiting for appenders...")
+		appenderGroup.Wait()
+
+		log.Println("Marshalling JSON response...")
+		respBytes, err := json.Marshal(&DB)
+		if err != nil {
+			panic("Can't marshal response!")
+		}
+		log.Println("Sending JSON response!")
+		w.Header().Add("Content-Type", "application/json")
+		w.Write(respBytes)
 	}
-	w.Header().Add("Content-Type", "application/json")
-	w.Write(respBytes)
 }
