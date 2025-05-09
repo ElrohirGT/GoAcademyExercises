@@ -22,7 +22,7 @@
       pkgs = nixpkgsFor.${system};
     in {
       default = pkgs.mkShell {
-        packages = [pkgs.go pkgs.gotools pkgs.gopls pkgs.go-tools];
+        packages = [pkgs.go pkgs.gotools pkgs.gopls pkgs.go-tools pkgs.kind pkgs.tilt];
       };
     });
   };
