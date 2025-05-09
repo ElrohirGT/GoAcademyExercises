@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"flag"
 	"log"
 	"net/http"
@@ -9,11 +10,14 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	_ "github.com/lib/pq"
 )
 
 type Params struct {
-	APIUrl          string
-	GracefulTimeout time.Duration
+	APIUrl             string
+	DBConnectionString string
+	GracefulTimeout    time.Duration
 }
 
 type Server struct {
@@ -26,19 +30,26 @@ func CreateNewServer() *Server {
 	}
 }
 
-func (self *Server) MountHandlers(params *Params) {
-	self.Router.HandleFunc("/fillDB", FillDBData(params.APIUrl))
+func (self *Server) MountHandlers(params *Params, db *sql.DB) {
+	self.Router.HandleFunc("/fillDB", FillDBData(params.APIUrl, db))
+	self.Router.HandleFunc("/ready", health)
 }
 
 func ParseParams() Params {
-	params := Params{}
+	params := Params{
+		APIUrl:             "https://randomuser.me/api/",
+		DBConnectionString: "postgres://backend:backend@localhost:5432/exercise",
+	}
 
 	flag.DurationVar(&params.GracefulTimeout, "graceful-timeout", time.Second*10, "the duration for which the server gracefully wait for existing connections to finish - e.g. 15s or 1m")
 	flag.Parse()
 
-	params.APIUrl = os.Getenv("API_URL")
-	if params.APIUrl == "" {
-		params.APIUrl = "https://randomuser.me/api/"
+	if apiUrl := os.Getenv("API_URL"); apiUrl != "" {
+		params.APIUrl = apiUrl
+	}
+
+	if dbConn := os.Getenv("DB_CONN"); dbConn != "" {
+		params.DBConnectionString = dbConn
 	}
 
 	return params
@@ -46,9 +57,19 @@ func ParseParams() Params {
 
 func main() {
 	params := ParseParams()
+	db, err := sql.Open("postgres", params.DBConnectionString)
+	if err != nil {
+		log.Panicf("Error: Unable to create connection %v", err)
+	}
+	defer db.Close()
+
+	err = db.Ping()
+	if err != nil {
+		log.Panicf("Error: Unable to create connection %v", err)
+	}
 
 	server := CreateNewServer()
-	server.MountHandlers(&params)
+	server.MountHandlers(&params, db)
 
 	srv := &http.Server{
 		Addr: "0.0.0.0:8080",

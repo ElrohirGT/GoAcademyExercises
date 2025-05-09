@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-api
+  labels:
+    app: user-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: user-api
+  template:
+    metadata:
+      labels:
+        app: user-api
+    spec:
+      containers:
+        - name: user-api-container
+          image: goacademy/user_api
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              port: 8080
+              path: '/ready'
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-api
+spec:
+  selector:
+    app: user-api
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+

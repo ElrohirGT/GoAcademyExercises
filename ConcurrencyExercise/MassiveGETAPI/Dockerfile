@@ -8,6 +8,7 @@ WORKDIR /src
 COPY . /src
 
 WORKDIR /src/MassiveGETAPI
+RUN go mod download
 RUN CGO_ENABLED=0 go build -o /bin/goapp .
 # RUN timeout 3s /bin/goapp || 0
 

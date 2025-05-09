@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/ElrohirGT/GoAcademyExercises/ConcurrencyExercise/Shared"
+	"github.com/lib/pq"
 )
 
 type User struct {
@@ -45,13 +48,19 @@ func NewUserFromAPI(u shared.APIUser, info map[string]any) User {
 const TARGET_USER_COUNT = 10_000
 const WORKER_COUNT = 50
 const USERS_PER_REQUEST = 500
+const RETRY_LIMIT = 5
+
+var RETRY_LIMIT_EXCEEDED_ERR error = errors.New("Retry limit exceeded")
 
 var DB = make([]User, 0, TARGET_USER_COUNT)
 
-func FillDBData(APIUrl string) http.HandlerFunc {
+func FillDBData(APIUrl string, db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		reqContext := r.Context()
 
-		reqUrl, err := url.Parse(APIUrl)
+		var reqUrl *url.URL
+		reqUrl, err = url.Parse(APIUrl)
 		if err != nil {
 			panic("Failed to parse APIUrl!")
 		}
@@ -63,6 +72,28 @@ func FillDBData(APIUrl string) http.HandlerFunc {
 		reqUrlString := reqUrl.String()
 		log.Printf("Target of GET requests: %s", reqUrlString)
 
+		log.Printf("Initializing transaction...")
+		var tx *sql.Tx
+		tx, err = db.BeginTx(reqContext, nil)
+		if err != nil {
+			log.Printf("Failed to open transaction: `%s`", err)
+			http.Error(w, "Failed to open query transaction", http.StatusInternalServerError)
+			return
+		}
+
+		defer func() {
+			var comRollErr error
+			if err != nil {
+				comRollErr = tx.Rollback()
+			} else {
+				comRollErr = tx.Commit()
+			}
+
+			if comRollErr != nil {
+				log.Panicf("Error rolling back/committing transaction! %s", err)
+			}
+		}()
+
 		processedUsers := make(chan User, USERS_PER_REQUEST*2)
 
 		workTickets := make(chan bool, WORKER_COUNT*2)
@@ -72,7 +103,7 @@ func FillDBData(APIUrl string) http.HandlerFunc {
 
 			for range TARGET_USER_COUNT / USERS_PER_REQUEST {
 				select {
-				case <-r.Context().Done():
+				case <-reqContext.Done():
 					return
 				case workTickets <- true:
 				}
@@ -91,19 +122,22 @@ func FillDBData(APIUrl string) http.HandlerFunc {
 			}
 		}()
 
+		workerCtx, cancelWorkerCtx := context.WithCancelCause(reqContext)
+		defer cancelWorkerCtx(nil)
+
 		workersGroup := sync.WaitGroup{}
-		for i := range WORKER_COUNT {
+		for workerIdx := range WORKER_COUNT {
 			workersGroup.Add(1)
 			go func() {
 				defer func() {
-					log.Println("Worker ", i, " Done!")
+					log.Println("Worker ", workerIdx, " Done!")
 					workersGroup.Done()
 				}()
 
 			workerLoop:
 				for {
 					select {
-					case <-r.Context().Done():
+					case <-workerCtx.Done():
 						log.Println("Stopping worker due to context being canceled...")
 						return
 					case shouldKeep := <-workTickets:
@@ -111,33 +145,34 @@ func FillDBData(APIUrl string) http.HandlerFunc {
 							break workerLoop // Exit processing loop once makeReqSignal closes
 						}
 
-						var err error = errors.New("Dummy error for execution purposes")
+						err = errors.New("Dummy error for execution purposes")
+						retryCounter := 0
 
-						var resp *http.Response
-						var req *http.Request
-						var respBytes []byte
 					requestLoop:
-						for err != nil {
+						for retryCounter = 0; err != nil && retryCounter < RETRY_LIMIT; retryCounter += 1 {
 							err = nil
 
 							select {
-							case <-r.Context().Done():
+							case <-workerCtx.Done():
 								log.Println("Stopping worker due to context being canceled...")
 								return
-							default:
 
-								req, err = http.NewRequestWithContext(r.Context(), http.MethodGet, reqUrlString, nil)
+							default:
+								var req *http.Request
+								req, err = http.NewRequestWithContext(workerCtx, http.MethodGet, reqUrlString, nil)
 								if err != nil {
 									log.Println("Error: Creating GET request")
 									continue requestLoop
 								}
 
+								var resp *http.Response
 								resp, err = http.DefaultClient.Do(req)
 								if err != nil {
 									log.Printf("Error: Doing GET request. `%s`", err)
 									continue requestLoop
 								}
 
+								var respBytes []byte
 								respBytes, err = io.ReadAll(resp.Body)
 								if err != nil {
 									log.Println("Error: Reading HTTP body")
@@ -166,11 +201,24 @@ func FillDBData(APIUrl string) http.HandlerFunc {
 									continue requestLoop
 								}
 
-								for _, v := range apiResponse.Results {
-									user := NewUserFromAPI(v, apiResponse.Info)
-									processedUsers <- user
+								var stmt *sql.Stmt
+								stmt, err = tx.Prepare(pq.CopyIn("db_user", "id", "gender", "name", "location", "city", "state", "country", "email", "phone"))
+								if err != nil {
+									log.Printf("Error: Failed to create prepared statement for batch insert!")
+									continue requestLoop
+								}
+
+								if useStatement(&apiResponse, stmt, err, processedUsers) {
+									continue requestLoop
 								}
 							}
+						}
+
+						// If we reached the retry limit and didn't succeed then we need to respond as failure and cancel the request.
+						if retryCounter == RETRY_LIMIT && err != nil {
+							log.Printf("Error: Worker %d reached RETRY_LIMIT (%d). Err: %s\n", workerIdx, RETRY_LIMIT, err)
+							cancelWorkerCtx(RETRY_LIMIT_EXCEEDED_ERR)
+							break workerLoop
 						}
 					}
 				}
@@ -184,13 +232,61 @@ func FillDBData(APIUrl string) http.HandlerFunc {
 		log.Println("Waiting for appenders...")
 		appenderGroup.Wait()
 
+		err = workerCtx.Err()
+		if err == RETRY_LIMIT_EXCEEDED_ERR {
+			log.Printf("Workers failed because: %s", err.Error())
+			http.Error(w, "RETRY LIMIT EXCEEDED", http.StatusInternalServerError)
+			return
+		} else if err != nil {
+			log.Printf("Workers failed because: %s", err)
+			http.Error(w, "INTERNAL SERVER ERROR", http.StatusInternalServerError)
+			return
+		}
+
 		log.Println("Marshalling JSON response...")
 		respBytes, err := json.Marshal(&DB)
 		if err != nil {
 			panic("Can't marshal response!")
 		}
+
 		log.Println("Sending JSON response!")
 		w.Header().Add("Content-Type", "application/json")
 		w.Write(respBytes)
 	}
+}
+
+// Returns true if it should skip the rest of the iteration
+func useStatement(apiResponse *shared.APIResponse,
+	stmt *sql.Stmt,
+	err error,
+	processedUsers chan<- User) bool {
+	defer stmt.Close()
+
+	for _, v := range apiResponse.Results {
+		user := NewUserFromAPI(v, apiResponse.Info)
+		_, err = stmt.Exec(
+			user.Id,
+			user.Gender,
+			user.Name,
+			user.Location,
+			user.City,
+			user.State,
+			user.Country,
+			user.Email,
+			user.Phone,
+		)
+		if err != nil {
+			log.Printf("Error: Failed to add user to prepared statement! `%s`", err)
+			return true
+		}
+		processedUsers <- user
+	}
+
+	_, err = stmt.Exec()
+	if err != nil {
+		log.Printf("Error: Failed to execute prepared statement! `%s`", err)
+		return true
+	}
+
+	return false
 }

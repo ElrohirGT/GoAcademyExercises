@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: concurrency-db
+  labels:
+    app: concurrency-db
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: concurrency-db
+  template:
+    metadata:
+      labels:
+        app: concurrency-db
+    spec:
+      containers:
+        - name: concurrency-db-container
+          image: goacademy/db
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_PASSWORD
+              value: "1234"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: concurrency-db
+spec:
+  selector:
+    app: concurrency-db
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 5432
+
